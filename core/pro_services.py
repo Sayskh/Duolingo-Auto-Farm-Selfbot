@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from typing import Any
 
 import requests
@@ -52,8 +53,8 @@ class DuolingoProClient:
                 continue
         return {"status": "error", "raw": raw_text}
 
-    def _post_request(self, req_type: str, amount: Any) -> dict[str, Any]:
-        """Sends a request payload to https://api.duolingopro.net/request."""
+    def _post_request(self, req_type: str, amount: Any, max_retries: int = 4) -> dict[str, Any]:
+        """Sends a request payload to https://api.duolingopro.net/request with retry on cold-start #0006/401."""
         payload = {
             "type": req_type,
             "amount": amount,
@@ -61,18 +62,46 @@ class DuolingoProClient:
             "lang": "en"
         }
 
-        if self.use_scrapling and FetcherSession is not None:
-            try:
-                with FetcherSession(impersonate="chrome", stealthy_headers=True) as session:
-                    resp = session.post(self.API_URL, json=payload, headers=self.headers, timeout=20)
-                    body_text = resp.body.decode("utf-8", errors="replace") if hasattr(resp, "body") else getattr(resp, "text", "")
-                    return self._parse_stream_response(body_text)
-            except Exception as e:
-                logger.warning(f"Scrapling failed: {e}, falling back to requests")
+        # ponytail: 4 retries for cold-start #0006; add session keep-alive if provider adds persistent websockets
+        for attempt in range(1, max_retries + 1):
+            body_text = ""
+            status_code = None
 
-        # Fallback using standard requests
-        resp = requests.post(self.API_URL, json=payload, headers=self.headers, timeout=20)
-        return self._parse_stream_response(resp.text)
+            if self.use_scrapling and FetcherSession is not None:
+                try:
+                    with FetcherSession(impersonate="chrome", stealthy_headers=True) as session:
+                        resp = session.post(self.API_URL, json=payload, headers=self.headers, timeout=20)
+                        status_code = getattr(resp, "status", getattr(resp, "status_code", None))
+                        body_text = resp.body.decode("utf-8", errors="replace") if hasattr(resp, "body") else getattr(resp, "text", "")
+                except Exception as e:
+                    logger.warning(f"Scrapling failed on attempt {attempt}: {e}")
+
+            if not body_text:
+                try:
+                    resp = requests.post(self.API_URL, json=payload, headers=self.headers, timeout=20)
+                    status_code = resp.status_code
+                    body_text = resp.text
+                except Exception as e:
+                    logger.warning(f"Requests fallback failed on attempt {attempt}: {e}")
+
+            parsed = self._parse_stream_response(body_text)
+
+            is_auth_error = (
+                status_code == 401
+                or "#0006" in body_text
+                or "Authentication Error" in body_text
+                or "#0006" in str(parsed)
+            )
+
+            if is_auth_error and attempt < max_retries:
+                delay = 2.0 * attempt
+                logger.info(f"Cold-start auth error (#0006/401) on attempt {attempt}/{max_retries}. Retrying in {delay:.1f}s...")
+                time.sleep(delay)
+                continue
+
+            return parsed
+
+        return {"status": "error", "raw": "Max retries exceeded"}
 
     def claim_monthly_badge(self, month: int, year: int) -> dict[str, Any]:
         """

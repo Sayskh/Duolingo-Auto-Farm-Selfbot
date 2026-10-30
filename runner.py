@@ -249,28 +249,34 @@ def main():
                 if len(missing_badges) > 4:
                     log("BADGES", f"- And {len(missing_badges) - 4} more.")
 
-                target_month, target_year = missing_badges[0]
-                log("BADGES", f"Requesting historical badge {target_month:02d}-{target_year}...")
-                try:
-                    badge_resp = pro_client.claim_monthly_badge(target_month, target_year)
-                    status = badge_resp.get("status")
-                    notification = badge_resp.get("notification", {})
-                    notif_head = notification.get("head", "")
-                    notif_body = notification.get("body", "")
+                # ponytail: linear probe missing badges; breaks on cooldown or claim, advances on single-badge failure
+                for target_month, target_year in missing_badges:
+                    log("BADGES", f"Requesting historical badge {target_month:02d}-{target_year}...")
+                    try:
+                        badge_resp = pro_client.claim_monthly_badge(target_month, target_year)
+                        status = badge_resp.get("status")
+                        notification = badge_resp.get("notification", {})
+                        notif_head = notification.get("head", "")
+                        notif_body = notification.get("body", "")
 
-                    if status in ("success", "completed") or badge_resp.get("percentage", 0) == 100:
-                        remaining = len(missing_badges) - 1
-                        badge_status = f"Claimed {target_month:02d}-{target_year} ({remaining} remaining)"
-                        log("BADGES", badge_status)
-                    elif status == "rejected" or "Limit Warning" in notif_head or "resets back" in notif_body:
-                        badge_status = f"Cooldown: {notif_body or 'Limit reached (1 badge/4h)'}"
-                        log("BADGES", badge_status)
-                        log("BADGES", "The next scheduled workflow will retry claiming this badge.")
-                    else:
-                        badge_status = f"Provider response: {badge_resp.get('raw', badge_resp)}"
-                        log("BADGES", badge_status)
-                except Exception as e:
-                    log("BADGES", f"Historical badge request error: {e}")
+                        if status in ("success", "completed") or badge_resp.get("percentage", 0) == 100:
+                            remaining = len(missing_badges) - 1
+                            badge_status = f"Claimed {target_month:02d}-{target_year} ({remaining} remaining)"
+                            log("BADGES", badge_status)
+                            break
+                        elif status == "rejected" or "Limit Warning" in notif_head or "resets back" in notif_body:
+                            badge_status = f"Cooldown: {notif_body or 'Limit reached (1 badge/4h)'}"
+                            log("BADGES", badge_status)
+                            log("BADGES", "The next scheduled workflow will retry claiming this badge.")
+                            break
+                        else:
+                            badge_status = f"Provider response ({target_month:02d}-{target_year}): {badge_resp.get('raw', badge_resp)}"
+                            log("BADGES", f"{badge_status}. Advancing to next badge...")
+                            continue
+                    except Exception as e:
+                        badge_status = f"Error ({target_month:02d}-{target_year}): {e}"
+                        log("BADGES", f"{badge_status}. Advancing to next badge...")
+                        continue
             elif not current_missing:
                 badge_status = "All monthly badges are up to date."
                 log("BADGES", badge_status)

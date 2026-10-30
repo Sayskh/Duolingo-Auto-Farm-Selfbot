@@ -1,3 +1,4 @@
+import datetime
 import json
 import logging
 import random
@@ -202,6 +203,74 @@ class DuolingoDirectClient:
             return {}
         return data
 
+    def get_goals_schema(self) -> dict[str, Any]:
+        """
+        Fetches official goals schema definitions from goals-api.duolingo.com/schema.
+        """
+        url = "https://goals-api.duolingo.com/schema?ui_language=en"
+        status, data = self._request("GET", url)
+        if status != 200:
+            logger.warning(f"Could not fetch goals schema (HTTP {status})")
+            return {}
+        return data
+
+    def update_goals_progress_batch(
+        self,
+        user_id: str,
+        metric_updates: list[dict[str, Any]],
+        timezone: str = "Asia/Jakarta"
+    ) -> dict[str, Any]:
+        """
+        Submits batch progress updates to https://goals-api.duolingo.com/users/{user_id}/progress/batch.
+        """
+        # ponytail: direct batch progress update; add individual quest listener if event streaming is added
+        url = f"https://goals-api.duolingo.com/users/{quote(str(user_id), safe='')}/progress/batch"
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        payload = {
+            "metric_updates": metric_updates,
+            "timezone": timezone,
+            "timestamp": now_iso
+        }
+        status, data = self._request("POST", url, json_data=payload)
+        return {"status_code": status, "success": status in (200, 201), "data": data}
+
+    def complete_daily_quests_and_badges(
+        self,
+        user_id: str,
+        timezone: str = "Asia/Jakarta"
+    ) -> dict[str, Any]:
+        """
+        Completes daily quests and advances monthly challenge progress natively
+        via goals-api.duolingo.com/users/{user_id}/progress/batch.
+        """
+        schema = self.get_goals_schema()
+        progress = self.get_goals_progress(user_id, timezone=timezone)
+        earned = set(progress.get("badges", {}).get("earned", []))
+
+        metrics = set()
+        goals = schema.get("goals", []) if isinstance(schema, dict) else []
+        for goal in goals:
+            if not isinstance(goal, dict):
+                continue
+            cat = (goal.get("category") or "").upper()
+            is_daily = "DAILY" in cat
+            done = (goal.get("badgeId") in earned) or (goal.get("goalId") in earned)
+            if is_daily and not done and goal.get("metric"):
+                metrics.add(goal["metric"])
+
+        if not metrics:
+            metrics = {
+                "LESSONS", "SPEND_TIME", "PERFECT_LESSONS",
+                "LISTEN_EXERCISES", "SPEAK_EXERCISES", "CORRECT_IN_A_ROW"
+            }
+
+        updates = [{"metric": m, "quantity": 2000} for m in sorted(metrics)]
+        # Add 50 completed quests to satisfy monthly challenge badge
+        updates.append({"metric": "QUESTS", "quantity": 50})
+
+        res = self.update_goals_progress_batch(user_id, updates, timezone=timezone)
+        return res
+
     def join_classroom(self, user_id: str, classroom_code: str) -> dict[str, Any]:
         """
         Attempts to join a Duolingo classroom using a 6-character classroom code.
@@ -234,42 +303,79 @@ class DuolingoDirectClient:
         goals_data = self.get_goals_progress(user_id, timezone=timezone)
         if not isinstance(goals_data, dict):
             goals_data = {}
+        earned = set(goals_data.get("badges", {}).get("earned", []))
 
-        raw_daily = (
-            goals_data.get("dailyGoals")
-            or goals_data.get("dailyQuests")
-            or goals_data.get("goals", [])
-        )
-        if not isinstance(raw_daily, list):
-            raw_daily = []
+        schema = self.get_goals_schema()
+        schema_goals = schema.get("goals", []) if isinstance(schema, dict) else []
 
         daily_quests = []
-        for q in raw_daily:
-            if not isinstance(q, dict):
-                continue
-            title = q.get("title") or q.get("type", "Quest")
-            progress = q.get("progress", 0)
-            goal = q.get("target", q.get("goal", 1))
-            completed = bool(q.get("completed", progress >= goal if goal else False))
-            daily_quests.append({
-                "title": title,
-                "progress": progress,
-                "goal": goal,
-                "completed": completed
-            })
-
-        monthly_raw = goals_data.get("monthlyChallenge") or goals_data.get("monthlyGoal")
         monthly_challenge = {}
-        if isinstance(monthly_raw, dict):
-            m_prog = monthly_raw.get("progress", 0)
-            m_goal = monthly_raw.get("target", monthly_raw.get("goal", 30))
-            monthly_challenge = {
-                "month": monthly_raw.get("month"),
-                "year": monthly_raw.get("year"),
-                "progress": m_prog,
-                "goal": m_goal,
-                "earned": bool(monthly_raw.get("earned", monthly_raw.get("completed", m_prog >= m_goal if m_goal else False)))
-            }
+
+        if schema_goals:
+            for g in schema_goals:
+                if not isinstance(g, dict):
+                    continue
+                cat = (g.get("category") or "").upper()
+                badge_id = g.get("badgeId")
+                goal_id = g.get("goalId")
+                is_done = (badge_id in earned) or (goal_id in earned)
+
+                if "DAILY" in cat:
+                    title = g.get("title") or g.get("name") or g.get("metric", "Daily Quest")
+                    target = g.get("target") or g.get("goal", 1)
+                    prog = target if is_done else g.get("progress", 0)
+                    daily_quests.append({
+                        "title": title,
+                        "progress": prog,
+                        "goal": target,
+                        "completed": is_done
+                    })
+                elif "MONTHLY" in cat and not monthly_challenge:
+                    target = g.get("target") or g.get("goal", 30)
+                    now = datetime.datetime.now()
+                    prog = target if is_done else 0
+                    monthly_challenge = {
+                        "month": now.month,
+                        "year": now.year,
+                        "progress": prog,
+                        "goal": target,
+                        "earned": is_done
+                    }
+
+        # Fallback to direct goals_data if schema returned no daily quests
+        if not daily_quests:
+            raw_daily = (
+                goals_data.get("dailyGoals")
+                or goals_data.get("dailyQuests")
+                or goals_data.get("goals", [])
+            )
+            if isinstance(raw_daily, list):
+                for q in raw_daily:
+                    if not isinstance(q, dict):
+                        continue
+                    title = q.get("title") or q.get("type", "Quest")
+                    progress = q.get("progress", 0)
+                    goal = q.get("target", q.get("goal", 1))
+                    completed = bool(q.get("completed", progress >= goal if goal else False))
+                    daily_quests.append({
+                        "title": title,
+                        "progress": progress,
+                        "goal": goal,
+                        "completed": completed
+                    })
+
+        if not monthly_challenge:
+            monthly_raw = goals_data.get("monthlyChallenge") or goals_data.get("monthlyGoal")
+            if isinstance(monthly_raw, dict):
+                m_prog = monthly_raw.get("progress", 0)
+                m_goal = monthly_raw.get("target", monthly_raw.get("goal", 30))
+                monthly_challenge = {
+                    "month": monthly_raw.get("month"),
+                    "year": monthly_raw.get("year"),
+                    "progress": m_prog,
+                    "goal": m_goal,
+                    "earned": bool(monthly_raw.get("earned", monthly_raw.get("completed", m_prog >= m_goal if m_goal else False)))
+                }
 
         friends_raw = goals_data.get("friendsQuest") or goals_data.get("partnerGoal")
         friends_quest = None
@@ -298,24 +404,45 @@ class DuolingoDirectClient:
         goals_data = self.get_goals_progress(user_id, timezone=timezone)
         earned = set(goals_data.get("badges", {}).get("earned", []))
 
-        # Check current month quest earned status from goals_data
-        monthly_raw = goals_data.get("monthlyChallenge") or goals_data.get("monthlyGoal")
-        current_m = monthly_raw.get("month") if isinstance(monthly_raw, dict) else None
-        current_y = monthly_raw.get("year") if isinstance(monthly_raw, dict) else None
-        current_earned = bool(monthly_raw.get("earned", monthly_raw.get("completed", False))) if isinstance(monthly_raw, dict) else False
+        # Check current month quest earned status from schema or goals_data
+        schema = self.get_goals_schema()
+        schema_goals = schema.get("goals", []) if isinstance(schema, dict) else []
+        current_earned = False
+        for g in schema_goals:
+            if isinstance(g, dict) and "MONTHLY" in (g.get("category") or "").upper():
+                badge_id = g.get("badgeId")
+                goal_id = g.get("goalId")
+                if (badge_id in earned) or (goal_id in earned):
+                    current_earned = True
+                    break
+
+        if not current_earned:
+            monthly_raw = goals_data.get("monthlyChallenge") or goals_data.get("monthlyGoal")
+            if isinstance(monthly_raw, dict):
+                current_earned = bool(monthly_raw.get("earned", monthly_raw.get("completed", False)))
+
+        now = datetime.datetime.now()
+        current_m = now.month
+        current_y = now.year
 
         missing = []
-        import datetime
-        now = datetime.datetime.now()
-        target_years = sorted(list({now.year, 2025, 2024}), reverse=True)
+        target_years = sorted(list({current_y, 2025, 2024}), reverse=True)
         for year in target_years:
-            max_month = now.month if year == now.year else 12
+            max_month = current_m if year == current_y else 12
             for month in range(max_month, 0, -1):
-                if year == current_y and month == current_m and current_earned:
+                if year == current_y and month == current_m:
+                    if not current_earned:
+                        missing.append((month, year))
                     continue
-                badge_key_1 = f"{year}_{month:02d}_monthly_challenge"
-                badge_key_2 = f"{year}_{month:02d}_monthly_goal"
-                if badge_key_1 not in earned and badge_key_2 not in earned:
+
+                possible_keys = [
+                    f"{year}_{month:02d}_monthly_challenge",
+                    f"{year}_{month:02d}_monthly_goal",
+                    f"{year}_{month}_monthly_challenge",
+                    f"{year}_{month}_monthly_goal",
+                    f"{year}-{month:02d}",
+                ]
+                if not any(k in earned for k in possible_keys):
                     missing.append((month, year))
 
         return missing

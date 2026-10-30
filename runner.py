@@ -1,4 +1,5 @@
 import argparse
+import datetime
 import math
 import os
 import random
@@ -132,6 +133,9 @@ def main():
 
     quests_summary = "Not checked"
     try:
+        log("QUESTS", "Auto-completing daily quests and updating monthly challenge...")
+        direct_client.complete_daily_quests_and_badges(user_id, timezone=timezone)
+
         q_info = direct_client.get_quests_info(user_id, timezone=timezone)
         d_quests = q_info.get("daily_quests", [])
         completed_count = sum(1 for q in d_quests if q.get("completed"))
@@ -144,7 +148,7 @@ def main():
         quests_summary = f"{completed_count}/{total_count} complete"
         log("QUESTS", f"Daily Quests: {completed_count}/{total_count} complete | Monthly: {monthly_prog}/{monthly_goal}")
     except Exception as e:
-        log("QUESTS", f"Failed to retrieve quests info: {e}")
+        log("QUESTS", f"Failed to process quests: {e}")
 
     leaderboard_rank = None
     if args.leaderboard_top:
@@ -226,36 +230,39 @@ def main():
     if args.claim_badges:
         try:
             log("BADGES", "Checking monthly badge progress...")
-            missing_badges = direct_client.get_missing_monthly_badges(user_id)
+            missing_badges = direct_client.get_missing_monthly_badges(user_id, timezone=timezone)
+            now = datetime.datetime.now()
+            current_missing = any(m == now.month and y == now.year for m, y in missing_badges)
+
+            if current_missing:
+                log("BADGES", f"Unlocking current month badge ({now.month:02d}-{now.year}) natively via goals API...")
+                res = direct_client.complete_daily_quests_and_badges(user_id, timezone=timezone)
+                if res.get("success"):
+                    badge_status = f"Unlocked current month ({now.month:02d}-{now.year})"
+                    log("BADGES", badge_status)
+                    missing_badges = [(m, y) for m, y in missing_badges if not (m == now.month and y == now.year)]
+
             if missing_badges:
-                log("BADGES", f"Found {len(missing_badges)} missing monthly badges:")
+                log("BADGES", f"Found {len(missing_badges)} unearned historical badges:")
                 for m, y in missing_badges[:4]:
                     log("BADGES", f"- {m:02d}-{y}")
                 if len(missing_badges) > 4:
                     log("BADGES", f"- And {len(missing_badges) - 4} more.")
 
-
                 target_month, target_year = missing_badges[0]
-                log("BADGES", f"Requesting badge {target_month:02d}-{target_year}...")
-                badge_resp = pro_client.claim_monthly_badge(target_month, target_year)
-
-                status = badge_resp.get("status")
-                notification = badge_resp.get("notification", {})
-                notif_head = notification.get("head", "")
-                notif_body = notification.get("body", "")
-
-                if status == "success" or badge_resp.get("percentage", 0) > 0:
-                    badge_status = f"Request succeeded ({target_month:02d}-{target_year})"
-                    log("BADGES", badge_status)
-                elif "Limit Warning" in notif_head or "resets back" in notif_body:
-                    badge_status = f"Cooldown: {notif_body}"
-                    log("BADGES", badge_status)
-                    log("BADGES", "The next scheduled workflow may retry this request.")
-                else:
-                    badge_status = f"Response: {badge_resp.get('raw', badge_resp)}"
-                    log("BADGES", badge_status)
-            else:
-                badge_status = "No missing monthly badges found."
+                log("BADGES", f"Requesting historical badge {target_month:02d}-{target_year}...")
+                try:
+                    badge_resp = pro_client.claim_monthly_badge(target_month, target_year)
+                    status = badge_resp.get("status")
+                    if status == "success" or badge_resp.get("percentage", 0) > 0:
+                        badge_status = f"Claimed {target_month:02d}-{target_year}"
+                        log("BADGES", badge_status)
+                    else:
+                        log("BADGES", f"Provider response: {badge_resp.get('raw', badge_resp)}")
+                except Exception as e:
+                    log("BADGES", f"Historical badge request error: {e}")
+            elif not current_missing:
+                badge_status = "All monthly badges are up to date."
                 log("BADGES", badge_status)
         except Exception as e:
             badge_status = f"Failed: {e}"

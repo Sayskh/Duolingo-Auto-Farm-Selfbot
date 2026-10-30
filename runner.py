@@ -254,11 +254,21 @@ def main():
                 try:
                     badge_resp = pro_client.claim_monthly_badge(target_month, target_year)
                     status = badge_resp.get("status")
-                    if status == "success" or badge_resp.get("percentage", 0) > 0:
-                        badge_status = f"Claimed {target_month:02d}-{target_year}"
+                    notification = badge_resp.get("notification", {})
+                    notif_head = notification.get("head", "")
+                    notif_body = notification.get("body", "")
+
+                    if status in ("success", "completed") or badge_resp.get("percentage", 0) == 100:
+                        remaining = len(missing_badges) - 1
+                        badge_status = f"Claimed {target_month:02d}-{target_year} ({remaining} remaining)"
                         log("BADGES", badge_status)
+                    elif status == "rejected" or "Limit Warning" in notif_head or "resets back" in notif_body:
+                        badge_status = f"Cooldown: {notif_body or 'Limit reached (1 badge/4h)'}"
+                        log("BADGES", badge_status)
+                        log("BADGES", "The next scheduled workflow will retry claiming this badge.")
                     else:
-                        log("BADGES", f"Provider response: {badge_resp.get('raw', badge_resp)}")
+                        badge_status = f"Provider response: {badge_resp.get('raw', badge_resp)}"
+                        log("BADGES", badge_status)
                 except Exception as e:
                     log("BADGES", f"Historical badge request error: {e}")
             elif not current_missing:

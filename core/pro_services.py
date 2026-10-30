@@ -34,12 +34,30 @@ class DuolingoProClient:
         }
         self.use_scrapling = HAS_SCRAPLING
 
+    @staticmethod
+    def _parse_stream_response(raw_text: str) -> dict[str, Any]:
+        """Parses streamed newline-delimited JSON chunks and returns the latest JSON object."""
+        clean = raw_text.strip()
+        if not clean:
+            return {"status": "error", "raw": ""}
+        for line in reversed(clean.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError:
+                continue
+        return {"status": "error", "raw": raw_text}
+
     def _post_request(self, req_type: str, amount: Any) -> dict[str, Any]:
         """Sends a request payload to https://api.duolingopro.net/request."""
         payload = {
             "type": req_type,
             "amount": amount,
-            "version": "3.1BETA.05.1",
+            "version": "3.1BETA.05.2",
             "lang": "en"
         }
 
@@ -48,19 +66,13 @@ class DuolingoProClient:
                 with FetcherSession(impersonate="chrome", stealthy_headers=True) as session:
                     resp = session.post(self.API_URL, json=payload, headers=self.headers, timeout=20)
                     body_text = resp.body.decode("utf-8", errors="replace") if hasattr(resp, "body") else getattr(resp, "text", "")
-                    try:
-                        return json.loads(body_text)
-                    except json.JSONDecodeError:
-                        return {"status": "error", "raw": body_text}
+                    return self._parse_stream_response(body_text)
             except Exception as e:
                 logger.warning(f"Scrapling failed: {e}, falling back to requests")
 
         # Fallback using standard requests
         resp = requests.post(self.API_URL, json=payload, headers=self.headers, timeout=20)
-        try:
-            return resp.json()
-        except json.JSONDecodeError:
-            return {"status": "error", "raw": resp.text}
+        return self._parse_stream_response(resp.text)
 
     def claim_monthly_badge(self, month: int, year: int) -> dict[str, Any]:
         """

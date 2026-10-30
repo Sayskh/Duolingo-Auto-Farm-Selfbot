@@ -426,23 +426,24 @@ class DuolingoDirectClient:
         current_y = now.year
 
         missing = []
-        target_years = sorted(list({current_y, 2025, 2024}), reverse=True)
-        for year in target_years:
-            max_month = current_m if year == current_y else 12
-            for month in range(max_month, 0, -1):
+        # Duolingo monthly challenge badge system started in December 2021
+        for year in range(2021, current_y + 1):
+            start_m = 12 if year == 2021 else 1
+            end_m = current_m if year == current_y else 12
+            for month in range(start_m, end_m + 1):
                 if year == current_y and month == current_m:
                     if not current_earned:
                         missing.append((month, year))
                     continue
 
-                possible_keys = [
-                    f"{year}_{month:02d}_monthly_challenge",
-                    f"{year}_{month:02d}_monthly_goal",
-                    f"{year}_{month}_monthly_challenge",
-                    f"{year}_{month}_monthly_goal",
-                    f"{year}-{month:02d}",
-                ]
-                if not any(k in earned for k in possible_keys):
+                pref1 = f"{year}_{month:02d}"
+                pref2 = f"{year}_{month}_"
+                pref3 = f"{year}-{month:02d}"
+                is_earned = any(
+                    b.startswith(pref1) or b.startswith(pref2) or b.startswith(pref3)
+                    for b in earned
+                )
+                if not is_earned:
                     missing.append((month, year))
 
         return missing

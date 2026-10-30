@@ -25,6 +25,15 @@ on:
         required: false
         type: boolean
         default: false
+      classroom_code:
+        description: 'Classroom code for permanent Super Duolingo'
+        required: false
+        default: ''
+      leaderboard_top:
+        description: 'Farm XP to be #1 on weekly leaderboard'
+        required: false
+        type: boolean
+        default: true
 
 concurrency:
   group: duo-farm
@@ -54,10 +63,13 @@ jobs:
       - name: Run Duolingo automation
         env:
           JWT: ${{ secrets.JWT }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           XP_SESSIONS: ${{ github.event.inputs.sessions || '5' }}
           AUTO_CLAIM_REWARDS: ${{ github.event.inputs.claim_rewards || 'true' }}
           AUTO_CLAIM_BADGES: ${{ github.event.inputs.claim_badges || 'true' }}
           AUTO_SUPER: ${{ github.event.inputs.activate_super || 'false' }}
+          CLASSROOM_CODE: ${{ github.event.inputs.classroom_code || secrets.CLASSROOM_CODE }}
+          AUTO_LEADERBOARD_TOP: ${{ github.event.inputs.leaderboard_top || 'true' }}
           AUTO_FREEZE: 'true'
         run: |
           python runner.py

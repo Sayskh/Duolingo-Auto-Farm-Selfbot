@@ -19,6 +19,7 @@ class DuolingoDirectClient:
     """Client for Duolingo's web API."""
 
     BASE_URL = "https://www.duolingo.com/2017-06-30"
+    LEADERBOARD_URL = "https://duolingo-leaderboards-prod.duolingo.com/leaderboards/7d9f5dd1-8423-491a-91f2-2532052038ce"
 
     def __init__(self, jwt_token: str):
         self.jwt_token = jwt_token.strip().removeprefix("Bearer ").strip()
@@ -75,7 +76,7 @@ class DuolingoDirectClient:
 
     def get_user_profile(self, user_id: str) -> dict[str, Any]:
         """Fetches user metadata including streak, hearts, gems, current language, and total XP."""
-        fields = "id,username,currentCourse,fromLanguage,learningLanguage,hearts,totalXp,streak,streakData,gems,lingots,rewardBundles"
+        fields = "id,username,currentCourse,fromLanguage,learningLanguage,hearts,totalXp,streak,streakData,gems,lingots,rewardBundles,hasPlus"
         url = f"{self.BASE_URL}/users/{user_id}?fields={fields}"
         status, data = self._request("GET", url)
         if status != 200:
@@ -201,21 +202,193 @@ class DuolingoDirectClient:
             return {}
         return data
 
+    def join_classroom(self, user_id: str, classroom_code: str) -> dict[str, Any]:
+        """
+        Attempts to join a Duolingo classroom using a 6-character classroom code.
+        Permanent Super Duolingo activation via Schools.
+        """
+        # ponytail: join existing classroom code for permanent Super; add auto-create classroom teacher flow if manual code generation becomes burdensome
+        code = classroom_code.strip()
+        attempts = [
+            ("POST", f"https://schools-api.duolingo.com/classrooms/{code}/join", {"userId": user_id}),
+            ("POST", f"{self.BASE_URL}/classrooms/{code}/join", {"userId": user_id}),
+            ("POST", f"{self.BASE_URL}/users/{user_id}/classrooms", {"classroomId": code}),
+        ]
+
+        last_res = {"success": False, "status_code": 0, "data": {}}
+        for method, url, payload in attempts:
+            try:
+                status, data = self._request(method, url, json_data=payload)
+                if status in (200, 201):
+                    return {"success": True, "status_code": status, "data": data}
+                last_res = {"success": False, "status_code": status, "data": data}
+            except Exception as e:
+                last_res = {"success": False, "status_code": 0, "data": {"error": str(e)}}
+
+        return last_res
+
+    def get_quests_info(self, user_id: str, timezone: str = "Asia/Jakarta") -> dict[str, Any]:
+        """
+        Fetches official goals and provides parsed summary for daily, monthly, and friends quests.
+        """
+        goals_data = self.get_goals_progress(user_id, timezone=timezone)
+        if not isinstance(goals_data, dict):
+            goals_data = {}
+
+        raw_daily = (
+            goals_data.get("dailyGoals")
+            or goals_data.get("dailyQuests")
+            or goals_data.get("goals", [])
+        )
+        if not isinstance(raw_daily, list):
+            raw_daily = []
+
+        daily_quests = []
+        for q in raw_daily:
+            if not isinstance(q, dict):
+                continue
+            title = q.get("title") or q.get("type", "Quest")
+            progress = q.get("progress", 0)
+            goal = q.get("target", q.get("goal", 1))
+            completed = bool(q.get("completed", progress >= goal if goal else False))
+            daily_quests.append({
+                "title": title,
+                "progress": progress,
+                "goal": goal,
+                "completed": completed
+            })
+
+        monthly_raw = goals_data.get("monthlyChallenge") or goals_data.get("monthlyGoal")
+        monthly_challenge = {}
+        if isinstance(monthly_raw, dict):
+            m_prog = monthly_raw.get("progress", 0)
+            m_goal = monthly_raw.get("target", monthly_raw.get("goal", 30))
+            monthly_challenge = {
+                "month": monthly_raw.get("month"),
+                "year": monthly_raw.get("year"),
+                "progress": m_prog,
+                "goal": m_goal,
+                "earned": bool(monthly_raw.get("earned", monthly_raw.get("completed", m_prog >= m_goal if m_goal else False)))
+            }
+
+        friends_raw = goals_data.get("friendsQuest") or goals_data.get("partnerGoal")
+        friends_quest = None
+        if isinstance(friends_raw, dict):
+            f_prog = friends_raw.get("progress", 0)
+            f_goal = friends_raw.get("target", friends_raw.get("goal", 1))
+            friends_quest = {
+                "title": friends_raw.get("title", "Friends Quest"),
+                "progress": f_prog,
+                "goal": f_goal,
+                "completed": bool(friends_raw.get("completed", f_prog >= f_goal if f_goal else False)),
+                "partner": friends_raw.get("partner") or friends_raw.get("partnerName")
+            }
+
+        return {
+            "daily_quests": daily_quests,
+            "monthly_challenge": monthly_challenge,
+            "friends_quest": friends_quest
+        }
+
     def get_missing_monthly_badges(self, user_id: str, timezone: str = "Asia/Jakarta") -> list[tuple[int, int]]:
         """
-        Identifies which monthly badges (2024 - 2025) are unearned.
+        Identifies which monthly badges (current year back to 2024) are unearned.
         Returns a list of (month, year) tuples.
         """
         goals_data = self.get_goals_progress(user_id, timezone=timezone)
         earned = set(goals_data.get("badges", {}).get("earned", []))
 
+        # Check current month quest earned status from goals_data
+        monthly_raw = goals_data.get("monthlyChallenge") or goals_data.get("monthlyGoal")
+        current_m = monthly_raw.get("month") if isinstance(monthly_raw, dict) else None
+        current_y = monthly_raw.get("year") if isinstance(monthly_raw, dict) else None
+        current_earned = bool(monthly_raw.get("earned", monthly_raw.get("completed", False))) if isinstance(monthly_raw, dict) else False
+
         missing = []
-        # Target 2025 (months 1-12) and 2024 (months 1-12)
-        for year in [2025, 2024]:
-            for month in range(1, 13):
+        import datetime
+        now = datetime.datetime.now()
+        target_years = sorted(list({now.year, 2025, 2024}), reverse=True)
+        for year in target_years:
+            max_month = now.month if year == now.year else 12
+            for month in range(max_month, 0, -1):
+                if year == current_y and month == current_m and current_earned:
+                    continue
                 badge_key_1 = f"{year}_{month:02d}_monthly_challenge"
                 badge_key_2 = f"{year}_{month:02d}_monthly_goal"
                 if badge_key_1 not in earned and badge_key_2 not in earned:
                     missing.append((month, year))
 
         return missing
+
+    def get_leaderboard(self, user_id: str) -> dict[str, Any]:
+        """Fetches weekly leaderboard rankings and scores for the user's cohort."""
+        now_ms = int(time.time() * 1000)
+        url = f"{self.LEADERBOARD_URL}/users/{quote(str(user_id), safe='')}?client_unlocked=true&get_reactions=true&_={now_ms}"
+        status, data = self._request("GET", url)
+        if status != 200:
+            raise RuntimeError(f"Failed to fetch leaderboard (HTTP {status}): {data}")
+
+        rankings = []
+        if isinstance(data, dict):
+            active = data.get("active") or {}
+            cohort = active.get("cohort") if isinstance(active, dict) else {}
+            if isinstance(cohort, dict) and "rankings" in cohort:
+                rankings = cohort["rankings"]
+            elif isinstance(active, dict) and "rankings" in active:
+                rankings = active["rankings"]
+            elif "rankings" in data:
+                rankings = data["rankings"]
+            elif "users" in data:
+                rankings = data["users"]
+
+        parsed_entries = []
+        for entry in rankings:
+            if not isinstance(entry, dict):
+                continue
+            uid = str(entry.get("user_id") or entry.get("userId") or entry.get("id") or "")
+            score = entry.get("score")
+            if score is None:
+                score = entry.get("totalXp", entry.get("xp", entry.get("points", 0)))
+            try:
+                score = int(score)
+            except (ValueError, TypeError):
+                score = 0
+            parsed_entries.append((uid, score))
+
+        parsed_entries.sort(key=lambda x: x[1], reverse=True)
+        scores = [s for _, s in parsed_entries]
+
+        my_score = 0
+        rank = len(scores) + 1 if scores else 1
+        for idx, (uid, s) in enumerate(parsed_entries):
+            if uid == str(user_id):
+                my_score = s
+                rank = idx + 1
+                break
+
+        top_score = scores[0] if scores else my_score
+        second_score = scores[1] if len(scores) > 1 else (my_score if rank == 1 else top_score)
+
+        return {
+            "my_score": my_score,
+            "rank": rank,
+            "top_score": top_score,
+            "second_score": second_score,
+            "scores": scores,
+        }
+
+    @staticmethod
+    def calculate_target_xp(my_score: int, top_score: int, second_score: int, rank: int) -> int:
+        """Calculates natural-looking XP needed to secure #1, capped at 300 XP per run."""
+        if rank == 1:
+            gap = my_score - second_score
+            if gap > 100:
+                return 0
+            target = random.randint(15, 50)
+        else:
+            buffer = random.randint(15, 75)
+            target = top_score - my_score + buffer
+
+        # ponytail: cap at 300 XP/run; upgrade to dynamic velocity tracking if league competition ramps up
+        return max(0, min(target, 300))
+

@@ -168,7 +168,16 @@ def main():
                     my_score, top_score, second_score, leaderboard_rank
                 )
                 args.sessions = math.ceil(target_xp / 15) if target_xp > 0 else 0
-                log("LEADERBOARD", f"Target: +{target_xp} XP -> running {args.sessions} sessions.")
+                log("LEADERBOARD", f"Target: +{target_xp} XP -> calculated {args.sessions} sessions.")
+
+                # ponytail: preserve daily streak floor; ensure at least 1 session if today's streak is unextended
+                streak_data = profile.get("streakData", {}) if isinstance(profile, dict) else {}
+                current_streak_info = streak_data.get("currentStreak", {}) if isinstance(streak_data, dict) else {}
+                last_extended = current_streak_info.get("lastExtendedDate")
+                today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                if last_extended != today_str and args.sessions == 0:
+                    args.sessions = 1
+                    log("STREAK", f"Streak not extended today ({last_extended} vs {today_str}); forcing 1 practice session.")
             else:
                 log("LEADERBOARD", f"Session count ({args.sessions}) explicitly set; keeping without override.")
         except Exception as e:

@@ -261,7 +261,20 @@ def main():
 
                         if status in ("success", "completed") or badge_resp.get("percentage", 0) == 100:
                             remaining = len(missing_badges) - 1
-                            badge_status = f"Claimed {target_month:02d}-{target_year} ({remaining} remaining)"
+                            try:
+                                time.sleep(1.5)
+                                sync_prog = direct_client.get_goals_progress(user_id, timezone=timezone)
+                                sync_earned = set(sync_prog.get("badges", {}).get("earned", []))
+                                p1 = f"{target_year}_{target_month:02d}"
+                                p2 = f"{target_year}_{target_month}_"
+                                p3 = f"{target_year}-{target_month:02d}"
+                                actually_synced = any(b.startswith(p1) or b.startswith(p2) or b.startswith(p3) for b in sync_earned)
+                                if actually_synced:
+                                    badge_status = f"Claimed {target_month:02d}-{target_year} ({remaining} remaining)"
+                                else:
+                                    badge_status = f"Requested {target_month:02d}-{target_year} ({remaining} remaining)"
+                            except Exception:
+                                badge_status = f"Claimed {target_month:02d}-{target_year} ({remaining} remaining)"
                             log("BADGES", badge_status)
                             break
                         elif status == "rejected" or "Limit Warning" in notif_head or "resets back" in notif_body:

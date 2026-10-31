@@ -398,7 +398,8 @@ class DuolingoDirectClient:
 
     def get_missing_monthly_badges(self, user_id: str, timezone: str = "Asia/Jakarta") -> list[tuple[int, int]]:
         """
-        Identifies which monthly badges (current year back to 2024) are unearned.
+        Identifies which monthly challenge badges defined in Duolingo schema are unearned.
+        Duolingo Monthly Challenge badges officially began in June 2022 (2022_06).
         Returns a list of (month, year) tuples.
         """
         goals_data = self.get_goals_progress(user_id, timezone=timezone)
@@ -425,26 +426,43 @@ class DuolingoDirectClient:
         current_m = now.month
         current_y = now.year
 
-        missing = []
-        # Duolingo monthly challenge badge system started in December 2021
-        for year in range(2021, current_y + 1):
-            start_m = 12 if year == 2021 else 1
-            end_m = current_m if year == current_y else 12
-            for month in range(start_m, end_m + 1):
-                if year == current_y and month == current_m:
-                    if not current_earned:
-                        missing.append((month, year))
-                    continue
+        # Extract legitimate monthly challenge badges from Duolingo schema
+        valid_challenges = set()
+        for g in schema_goals:
+            if not isinstance(g, dict):
+                continue
+            badge_id = g.get("badgeId") or ""
+            if "_monthly_challenge" in badge_id:
+                parts = badge_id.split("_")
+                if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                    y, m = int(parts[0]), int(parts[1])
+                    if y < current_y or (y == current_y and m <= current_m):
+                        valid_challenges.add((m, y))
 
-                pref1 = f"{year}_{month:02d}"
-                pref2 = f"{year}_{month}_"
-                pref3 = f"{year}-{month:02d}"
-                is_earned = any(
-                    b.startswith(pref1) or b.startswith(pref2) or b.startswith(pref3)
-                    for b in earned
-                )
-                if not is_earned:
-                    missing.append((month, year))
+        # Fallback if schema returned no goals: Monthly challenges began June 2022 (2022_06)
+        if not valid_challenges:
+            for y in range(2022, current_y + 1):
+                start_m = 6 if y == 2022 else 1
+                end_m = current_m if y == current_y else 12
+                for m in range(start_m, end_m + 1):
+                    valid_challenges.add((m, y))
+
+        missing = []
+        for m, y in sorted(valid_challenges, key=lambda x: (x[1], x[0])):
+            if y == current_y and m == current_m:
+                if not current_earned:
+                    missing.append((m, y))
+                continue
+
+            pref1 = f"{y}_{m:02d}"
+            pref2 = f"{y}_{m}_"
+            pref3 = f"{y}-{m:02d}"
+            is_earned = any(
+                b.startswith(pref1) or b.startswith(pref2) or b.startswith(pref3)
+                for b in earned
+            )
+            if not is_earned:
+                missing.append((m, y))
 
         return missing
 

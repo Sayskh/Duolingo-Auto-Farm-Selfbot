@@ -258,9 +258,14 @@ def main():
                 if len(missing_badges) > 4:
                     log("BADGES", f"- And {len(missing_badges) - 4} more.")
 
-                # ponytail: linear probe missing badges; breaks on cooldown or claim, advances on single-badge failure
+                # ponytail: probe every missing badge; provider can stall mid-stream (~40%) without a terminal frame
+                claimed = []
+                stalled = []
+                failed = []
+                cooldown_msg = ""
                 for target_month, target_year in missing_badges:
-                    log("BADGES", f"Requesting historical badge {target_month:02d}-{target_year}...")
+                    label = f"{target_month:02d}-{target_year}"
+                    log("BADGES", f"Requesting historical badge {label}...")
                     try:
                         badge_resp = pro_client.claim_monthly_badge(target_month, target_year)
                         status = badge_resp.get("status")
@@ -269,36 +274,44 @@ def main():
                         notif_body = notification.get("body", "")
 
                         if status in ("success", "completed") or badge_resp.get("percentage", 0) == 100:
-                            remaining = len(missing_badges) - 1
+                            time.sleep(1.5)
+                            actually_synced = False
                             try:
-                                time.sleep(1.5)
                                 sync_prog = direct_client.get_goals_progress(user_id, timezone=timezone)
                                 sync_earned = set(sync_prog.get("badges", {}).get("earned", []))
                                 p1 = f"{target_year}_{target_month:02d}"
                                 p2 = f"{target_year}_{target_month}_"
                                 p3 = f"{target_year}-{target_month:02d}"
-                                actually_synced = any(b.startswith(p1) or b.startswith(p2) or b.startswith(p3) for b in sync_earned)
-                                if actually_synced:
-                                    badge_status = f"Claimed {target_month:02d}-{target_year} ({remaining} remaining)"
-                                else:
-                                    badge_status = f"Requested {target_month:02d}-{target_year} ({remaining} remaining)"
+                                actually_synced = any(
+                                    b.startswith(p1) or b.startswith(p2) or b.startswith(p3) for b in sync_earned
+                                )
                             except Exception:
-                                badge_status = f"Claimed {target_month:02d}-{target_year} ({remaining} remaining)"
-                            log("BADGES", badge_status)
-                            break
+                                pass
+                            (claimed if actually_synced else stalled).append(label)
+                            log("BADGES", f"{label}: {'claimed and synced' if actually_synced else 'provider reported done, not on profile yet'}")
                         elif status == "rejected" or "Limit Warning" in notif_head or "resets back" in notif_body:
-                            badge_status = f"Cooldown: {notif_body or 'Limit reached (1 badge/4h)'}"
-                            log("BADGES", badge_status)
-                            log("BADGES", "The next scheduled workflow will retry claiming this badge.")
+                            cooldown_msg = notif_body or "Limit reached (1 badge/4h)"
+                            log("BADGES", f"{label}: cooldown ({cooldown_msg}). Stopping badge queue.")
                             break
                         else:
-                            badge_status = f"Provider response ({target_month:02d}-{target_year}): {badge_resp.get('raw', badge_resp)}"
-                            log("BADGES", f"{badge_status}. Advancing to next badge...")
-                            continue
+                            pct = badge_resp.get("percentage")
+                            failed.append(f"{label}@{pct}%" if pct is not None else f"{label}:{status or 'error'}")
+                            log("BADGES", f"{label}: provider stalled (status={status}, percentage={pct}).")
                     except Exception as e:
-                        badge_status = f"Error ({target_month:02d}-{target_year}): {e}"
-                        log("BADGES", f"{badge_status}. Advancing to next badge...")
-                        continue
+                        failed.append(f"{label}:exception")
+                        log("BADGES", f"{label}: request error ({e}).")
+
+                parts = []
+                if claimed:
+                    parts.append(f"claimed {', '.join(claimed)}")
+                if stalled:
+                    parts.append(f"pending sync {', '.join(stalled)}")
+                if failed:
+                    parts.append(f"stalled {', '.join(failed)}")
+                if cooldown_msg:
+                    parts.append(f"cooldown until reset")
+                badge_status = "; ".join(parts) if parts else "No badge action taken"
+                log("BADGES", badge_status)
             elif not current_missing:
                 badge_status = "All monthly badges are up to date."
                 log("BADGES", badge_status)

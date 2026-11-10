@@ -70,7 +70,7 @@ class DuolingoProClient:
             if self.use_scrapling and FetcherSession is not None:
                 try:
                     with FetcherSession(impersonate="chrome", stealthy_headers=True) as session:
-                        resp = session.post(self.API_URL, json=payload, headers=self.headers, timeout=20)
+                        resp = session.post(self.API_URL, json=payload, headers=self.headers, timeout=90)
                         status_code = getattr(resp, "status", getattr(resp, "status_code", None))
                         body_text = resp.body.decode("utf-8", errors="replace") if hasattr(resp, "body") else getattr(resp, "text", "")
                 except Exception as e:
@@ -78,7 +78,7 @@ class DuolingoProClient:
 
             if not body_text:
                 try:
-                    resp = requests.post(self.API_URL, json=payload, headers=self.headers, timeout=20)
+                    resp = requests.post(self.API_URL, json=payload, headers=self.headers, timeout=90)
                     status_code = resp.status_code
                     body_text = resp.text
                 except Exception as e:

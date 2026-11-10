@@ -263,11 +263,25 @@ def main():
                 stalled = []
                 failed = []
                 cooldown_msg = ""
+
+                def claim_with_throttle_retry(month, year, tries=2):
+                    """Provider allows one request per 5s; retry once on throttle instead of misreporting a stall."""
+                    resp = {}
+                    for attempt in range(tries):
+                        if attempt:
+                            time.sleep(6)
+                        resp = pro_client.claim_monthly_badge(month, year)
+                        body = str(resp.get("notification", {}).get("body", ""))
+                        if "every 5 seconds" in body:
+                            continue
+                        return resp
+                    return resp
+
                 for target_month, target_year in missing_badges:
                     label = f"{target_month:02d}-{target_year}"
                     log("BADGES", f"Requesting historical badge {label}...")
                     try:
-                        badge_resp = pro_client.claim_monthly_badge(target_month, target_year)
+                        badge_resp = claim_with_throttle_retry(target_month, target_year)
                         status = badge_resp.get("status")
                         notification = badge_resp.get("notification", {})
                         notif_head = notification.get("head", "")
@@ -300,6 +314,7 @@ def main():
                     except Exception as e:
                         failed.append(f"{label}:exception")
                         log("BADGES", f"{label}: request error ({e}).")
+                    time.sleep(6)
 
                 parts = []
                 if claimed:
